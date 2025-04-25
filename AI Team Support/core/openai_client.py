@@ -2,10 +2,12 @@
 OpenAI API integration for Task Manager.
 Handles embeddings and AI-generated insights.
 """
-import json
 import os
+import sqlite3
+import pickle
 import traceback
 from hashlib import md5
+from datetime import datetime
 import numpy as np
 from openai import OpenAI
 
@@ -15,25 +17,44 @@ from config import (
     EMBEDDING_MODEL, 
     CHAT_MODEL, 
     DEBUG_MODE,
-    MIN_TASK_LENGTH
+    MIN_TASK_LENGTH,
+    MAX_CACHE_ENTRIES
 )
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Initialize embedding cache
-embedding_cache = {}
-embedding_cache_path = EMBEDDING_CACHE_PATH
+def setup_embedding_cache():
+    """Initialize the SQLite-based embedding cache."""
+    # Create database if it doesn't exist
+    conn = sqlite3.connect(EMBEDDING_CACHE_PATH)
+    cursor = conn.cursor()
+    
+    # Create table if it doesn't exist
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS embeddings (
+        text_hash TEXT PRIMARY KEY,
+        text TEXT,
+        embedding BLOB,
+        last_used TIMESTAMP
+    )
+    ''')
+    
+    # Create index for performance
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_last_used ON embeddings(last_used)')
+    
+    # Check existing entries count
+    cursor.execute('SELECT COUNT(*) FROM embeddings')
+    count = cursor.fetchone()[0]
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✅ Embedding cache initialized with {count} existing entries")
+    return EMBEDDING_CACHE_PATH
 
-# Load embedding cache if exists
-if os.path.exists(embedding_cache_path):
-    try:
-        with open(embedding_cache_path, "r") as f:
-            embedding_cache = json.load(f)
-        print(f"✅ Loaded {len(embedding_cache)} embeddings from cache")
-    except json.JSONDecodeError:
-        print("❌ Embedding cache file corrupted, starting with empty cache")
-        embedding_cache = {}
+# Initialize the cache on module load
+setup_embedding_cache()
 
 def debug_print(message):
     """Print debug messages if DEBUG_MODE is True."""
@@ -46,23 +67,56 @@ def get_cached_embedding(text):
         return None
 
     text_hash = md5(text.encode()).hexdigest()
-    if text_hash in embedding_cache:
-        return embedding_cache[text_hash]
+    
+    # Connect to SQLite
+    conn = sqlite3.connect(EMBEDDING_CACHE_PATH)
+    cursor = conn.cursor()
+    
+    # Look for cache hit
+    cursor.execute('SELECT embedding FROM embeddings WHERE text_hash = ?', (text_hash,))
+    result = cursor.fetchone()
+    
+    if result:
+        # Update last_used timestamp
+        cursor.execute('UPDATE embeddings SET last_used = ? WHERE text_hash = ?', 
+                      (datetime.now().isoformat(), text_hash))
+        conn.commit()
+        embedding = pickle.loads(result[0])
+        conn.close()
+        return embedding
 
+    # Cache miss - get from OpenAI
     try:
         response = client.embeddings.create(
             input=[text],
             model=EMBEDDING_MODEL
         )
         embedding = response.data[0].embedding
-        embedding_cache[text_hash] = embedding
-
-        # Save cache periodically to avoid losing data
-        with open(embedding_cache_path, "w") as f:
-            json.dump(embedding_cache, f)
-
+        
+        # Store in cache
+        cursor.execute(
+            'INSERT INTO embeddings (text_hash, text, embedding, last_used) VALUES (?, ?, ?, ?)',
+            (text_hash, text, pickle.dumps(embedding), datetime.now().isoformat())
+        )
+        
+        # Check if cache size is too large and prune if needed
+        cursor.execute('SELECT COUNT(*) FROM embeddings')
+        count = cursor.fetchone()[0]
+        
+        if count > MAX_CACHE_ENTRIES:
+            # Delete oldest entries
+            prune_count = count - MAX_CACHE_ENTRIES
+            cursor.execute(
+                'DELETE FROM embeddings WHERE text_hash IN (SELECT text_hash FROM embeddings ORDER BY last_used ASC LIMIT ?)',
+                (prune_count,)
+            )
+            debug_print(f"Pruned {prune_count} entries from embedding cache")
+        
+        conn.commit()
+        conn.close()
         return embedding
     except Exception as e:
+        conn.close()
         debug_print(f"Error getting embedding: {e}")
         return None
 
@@ -79,13 +133,27 @@ def get_batch_embeddings(texts):
     hash_lookup = {md5(t.encode()).hexdigest(): t for t in valid_texts}
     embeddings = {}
     texts_to_request = []
+    text_hashes_to_request = []
 
-    # Check cache first
-    for h, t in hash_lookup.items():
-        if h in embedding_cache:
-            embeddings[h] = embedding_cache[h]
+    # Connect to SQLite
+    conn = sqlite3.connect(EMBEDDING_CACHE_PATH)
+    cursor = conn.cursor()
+    
+    # Check cache first for all texts
+    for text_hash, text in hash_lookup.items():
+        cursor.execute('SELECT embedding FROM embeddings WHERE text_hash = ?', (text_hash,))
+        result = cursor.fetchone()
+        
+        if result:
+            # Update last_used timestamp
+            cursor.execute('UPDATE embeddings SET last_used = ? WHERE text_hash = ?', 
+                          (datetime.now().isoformat(), text_hash))
+            embeddings[text_hash] = pickle.loads(result[0])
         else:
-            texts_to_request.append(t)
+            texts_to_request.append(text)
+            text_hashes_to_request.append(text_hash)
+    
+    conn.commit()
 
     # Only call API if we have texts not in cache
     if texts_to_request:
@@ -94,22 +162,44 @@ def get_batch_embeddings(texts):
             batch_size = 100  # Adjust based on API limits
             for i in range(0, len(texts_to_request), batch_size):
                 batch = texts_to_request[i:i+batch_size]
+                batch_hashes = text_hashes_to_request[i:i+batch_size]
 
                 response = client.embeddings.create(
                     input=batch,
                     model=EMBEDDING_MODEL
                 )
 
-                for i, t in enumerate(batch):
-                    h = md5(t.encode()).hexdigest()
-                    embedding_cache[h] = response.data[i].embedding
-                    embeddings[h] = response.data[i].embedding
-
-            # Save the updated cache
-            with open(embedding_cache_path, "w") as f:
-                json.dump(embedding_cache, f)
+                # Store new embeddings in cache and results
+                for j, embedding_data in enumerate(response.data):
+                    text_hash = batch_hashes[j]
+                    text = batch[j]
+                    embedding = embedding_data.embedding
+                    
+                    cursor.execute(
+                        'INSERT INTO embeddings (text_hash, text, embedding, last_used) VALUES (?, ?, ?, ?)',
+                        (text_hash, text, pickle.dumps(embedding), datetime.now().isoformat())
+                    )
+                    
+                    embeddings[text_hash] = embedding
+            
+            # Check if cache size is too large and prune if needed
+            cursor.execute('SELECT COUNT(*) FROM embeddings')
+            count = cursor.fetchone()[0]
+            
+            if count > MAX_CACHE_ENTRIES:
+                # Delete oldest entries
+                prune_count = count - MAX_CACHE_ENTRIES
+                cursor.execute(
+                    'DELETE FROM embeddings WHERE text_hash IN (SELECT text_hash FROM embeddings ORDER BY last_used ASC LIMIT ?)',
+                    (prune_count,)
+                )
+                debug_print(f"Pruned {prune_count} entries from embedding cache")
+            
+            conn.commit()
         except Exception as e:
             debug_print(f"Error in batch embeddings: {e}")
+    
+    conn.close()
 
     # Return embeddings mapped to original texts
     return {hash_lookup[h]: embeddings[h] for h in embeddings}
