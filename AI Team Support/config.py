@@ -19,7 +19,10 @@ DAYS_THRESHOLD = 2  # Days before a task is considered stale
 DEBUG_MODE = True  # Enable debug prints
 
 # File paths
-EMBEDDING_CACHE_PATH = "embedding_cache.json"
+EMBEDDING_CACHE_PATH = "embedding_cache.db"  # Changed from .json to .db
+
+# Embedding cache settings
+MAX_CACHE_ENTRIES = 10000  # Maximum number of entries to keep in cache
 
 # OpenAI model configuration
 EMBEDDING_MODEL = "text-embedding-ada-002"
