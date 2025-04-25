@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+    <div class="container mt-4">
+        <h1 class="text-center mb-4">📝 Daily Task Manager</h1>
+        
+        <div class="row">
+            <!-- Task Input Section -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Paste your daily update here</h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="updateForm">
+                            <div class="mb-3">
+                                <textarea id="updateText" class="form-control" rows="10" 
+                                placeholder="Paste your email or daily status update here..."></textarea>
+                            </div>
+                            <button id="submitBtn" type="submit" class="btn btn-primary">
+                                Submit Update
+                            </button>
+                            <div id="loadingIndicator" class="text-center mt-2" style="display: none;">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <p>Processing your update...</p>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Results Section -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Results</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="results">
+                            <p class="text-muted">Submit an update to see results here.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Task Management Tools -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="accordion" id="taskTools">
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="headingOne">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" aria-expanded="false" aria-controls="collapseOne">
+                                Task Management Tools
+                            </button>
+                        </h2>
+                        <div id="collapseOne" class="accordion-collapse collapse" aria-labelledby="headingOne" data-bs-parent="#taskTools">
+                            <div class="accordion-body">
+                                <div class="row">
+                                    <!-- Overdue Tasks Section -->
+                                    <div class="col-md-6">
+                                        <div class="card mb-3">
+                                            <div class="card-header">
+                                                <h5>Tasks that need follow-up</h5>
+                                            </div>
+                                            <div class="card-body">
+                                                <div id="reminderOutput" class="mb-3">
+                                                    <p class="text-muted">Click the button to check for overdue tasks.</p>
+                                                </div>
+                                                <button id="reminderBtn" class="btn btn-outline-primary">
+                                                    🔍 Check Overdue Tasks
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Project Tasks Section -->
+                                    <div class="col-md-6">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h5>Project Tasks</h5>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="mb-3">
+                                                    <label for="categoryDropdown" class="form-label">Select a Project (Category)</label>
+                                                    <select id="categoryDropdown" class="form-select">
+                                                        {% for category in categories %}
+                                                        <option value="{{ category }}">{{ category }}</option>
+                                                        {% endfor %}
+                                                    </select>
+                                                </div>
+                                                <div id="categoryResult" class="mb-3">
+                                                    <p class="text-muted">Select a project and click the button to view tasks.</p>
+                                                </div>
+                                                <button id="categoryBtn" class="btn btn-outline-primary">
+                                                    🔎 View Tasks by Project
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Help Section -->
+        <div class="row mt-4 mb-5">
+            <div class="col-12">
+                <div class="accordion" id="helpAccordion">
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="headingTwo">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTwo" aria-expanded="false" aria-controls="collapseTwo">
+                                Help
+                            </button>
+                        </h2>
+                        <div id="collapseTwo" class="accordion-collapse collapse" aria-labelledby="headingTwo" data-bs-parent="#helpAccordion">
+                            <div class="accordion-body">
+                                <h3>📋 How to Use</h3>
+                                <ul>
+                                    <li><strong>Daily Updates</strong>: Paste your email or status report into the text area and click "Submit Update". The system will extract tasks, match them with existing tasks, and update Notion.</li>
+                                    <li><strong>Overdue Tasks</strong>: Click "Check Overdue Tasks" to see tasks pending for more than 2 days.</li>
+                                    <li><strong>Project View</strong>: Select a project category and click "View Tasks by Project" to see all tasks for that project.</li>
+                                </ul>
+                                
+                                <h3>📝 Format Tips</h3>
+                                <p>For best results, include:</p>
+                                <ol>
+                                    <li>Your name/email at the beginning</li>
+                                    <li>Date information</li>
+                                    <li>Project or category headers</li>
+                                    <li>Clear descriptions of completed and pending work</li>
+                                </ol>
+                                
+                                <div class="card bg-light">
+                                    <div class="card-body">
+                                        <h4>Example:</h4>
+                                        <pre>John Smith
+April 12, 2025
+
+Project Alpha:
+- Completed the design documentation
+- Started working on the prototype, will finish by Friday
+- Need to schedule a review meeting with the team
+
+Project Beta:
+- Waiting for feedback on requirements</pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

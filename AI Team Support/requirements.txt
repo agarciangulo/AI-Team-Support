@@ -1,0 +1,7 @@
+openai==0.28
+notion-client
+pandas
+python-dateutil
+gradio
+scikit-learn
+numpy
