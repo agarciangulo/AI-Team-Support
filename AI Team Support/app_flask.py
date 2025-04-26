@@ -5,6 +5,15 @@ This provides a more traditional web interface that can be hosted as a regular w
 import os
 import sys
 import subprocess
+import traceback
+from datetime import datetime, timedelta
+import pandas as pd
+# Import from the new structure
+from core.adapters.notion_adapter import NotionAdapter
+from plugins import initialize_all_plugins, plugin_manager  # Add plugin_manager here
+
+# Import from the config
+from config import DEBUG_MODE
 
 # First make sure setuptools is installed
 try:
@@ -57,9 +66,6 @@ def install_requirements():
 install_requirements()
 
 from flask import Flask, render_template, request, jsonify
-import traceback
-from datetime import datetime, timedelta
-import pandas as pd
 
 # Import from the new structure
 from core.adapters.notion_adapter import NotionAdapter
@@ -86,28 +92,11 @@ from core.openai_client import (
     get_project_insight
 )
 
+# For the dashboard
+from core.ai.analyzers import TaskAnalyzer, ProjectAnalyzer
+
 # Initialize plugins
 initialize_all_plugins()
-
-# DEBUG: Check if security plugin is loaded and enabled
-print("Checking for security plugin...")
-from plugins import plugin_manager
-security_plugin = plugin_manager.get_plugin('ProjectProtectionPlugin')
-if security_plugin:
-    print(f"Security plugin found: {security_plugin}")
-    print(f"Security plugin enabled: {security_plugin.enabled}")
-    if hasattr(security_plugin, 'security_manager'):
-        print(f"Token file path: {security_plugin.security_manager.token_file_path}")
-        print(f"Token file exists: {os.path.exists(security_plugin.security_manager.token_file_path)}")
-        if os.path.exists(security_plugin.security_manager.token_file_path):
-            with open(security_plugin.security_manager.token_file_path, 'r') as f:
-                print(f"Token file content: {f.read()}")
-    else:
-        print("Security manager not initialized properly!")
-else:
-    print("Security plugin not found! Available plugins:")
-    for plugin in plugin_manager.get_all_plugins():
-        print(f" - {plugin}")
 
 # Initialize Flask app
 app = Flask(__name__, 
@@ -119,6 +108,156 @@ def index():
     """Render main page."""
     categories = list_all_categories()
     return render_template('index.html', categories=categories)
+
+@app.route('/dashboard')
+def dashboard():
+    """Render dashboard page."""
+    categories = list_all_categories()
+    return render_template('dashboard.html', categories=categories)
+
+@app.route('/api/dashboard_data')
+def api_dashboard_data():
+    """API endpoint to get dashboard data with filtering support."""
+    try:
+        # Get filter parameters
+        employee_filter = request.args.get('employee', 'all')
+        project_filter = request.args.get('project', 'all')
+        
+        # Get all tasks
+        df = fetch_notion_tasks()
+        
+        # Apply filters
+        filtered_df = df.copy()
+        
+        if employee_filter != 'all':
+            filtered_df = filtered_df[filtered_df['employee'] == employee_filter]
+            
+        if project_filter != 'all':
+            filtered_df = filtered_df[filtered_df['category'] == project_filter]
+        
+        # Calculate overall metrics
+        total_tasks = len(filtered_df)
+        completed_tasks = len(filtered_df[filtered_df['status'] == 'Completed'])
+        in_progress_tasks = len(filtered_df[filtered_df['status'] == 'In Progress'])
+        pending_tasks = len(filtered_df[filtered_df['status'] == 'Pending'])
+        blocked_tasks = len(filtered_df[filtered_df['status'] == 'Blocked'])
+        
+        completion_rate = round((completed_tasks / total_tasks * 100), 1) if total_tasks > 0 else 0
+        
+        # Calculate tasks by category
+        category_counts = filtered_df['category'].value_counts().to_dict()
+        
+        # Calculate task trend (completed tasks over time)
+        # Make sure to handle date conversion properly
+        filtered_df['date'] = pd.to_datetime(filtered_df['date'])
+        df_completed = filtered_df[filtered_df['status'] == 'Completed']
+        
+        # Group by date and count
+        if not df_completed.empty:
+            trend_data = df_completed.groupby(df_completed['date'].dt.strftime('%Y-%m-%d')).size().to_dict()
+            # Sort by date
+            trend_data = {k: trend_data[k] for k in sorted(trend_data.keys())}
+        else:
+            trend_data = {}
+        
+        # Calculate project health scores
+        project_health = {}
+        
+        # Use only the filtered dataframe when calculating project health
+        if project_filter != 'all':
+            # If filtering by project, only calculate health for that project
+            categories = [project_filter]
+        else:
+            # Otherwise, get all unique categories from the filtered dataframe
+            categories = filtered_df['category'].unique()
+        
+        from core.ai.analyzers import ProjectAnalyzer
+        analyzer = ProjectAnalyzer()
+        
+        for category in categories:
+            if not category or category == '':
+                continue
+                
+            # For project health, we need to consider all tasks in that project
+            # (not just the filtered employee's tasks)
+            if employee_filter != 'all':
+                # When filtering by employee, show the project health of the
+                # projects they're working on, but based on all tasks in that project
+                category_tasks = df[df['category'] == category]
+            else:
+                category_tasks = filtered_df[filtered_df['category'] == category]
+                
+            if len(category_tasks) > 0:
+                health_check = analyzer.analyze(category_tasks, category, "health_check")
+                project_health[category] = {
+                    "score": round(health_check.get("health_score", 50), 1),
+                    "status": health_check.get("health_status", "Unknown"),
+                    "task_count": health_check.get("task_count", 0)
+                }
+        
+        # Employee productivity
+        employee_stats = {}
+        
+        # Use the original dataframe to get all employees for the dropdown
+        all_employees = df['employee'].unique().tolist()
+        all_employees = [e for e in all_employees if e and e.strip()]
+        
+        # If filtering by employee, only show that employee's stats
+        if employee_filter != 'all':
+            employees = [employee_filter]
+        elif employee_filter == 'all' and project_filter != 'all':
+            # If filtering by project, only show employees in that project
+            employees = filtered_df['employee'].unique()
+        else:
+            # Otherwise, show all employees
+            employees = filtered_df['employee'].unique()
+        
+        for employee in employees:
+            if not employee or employee == '':
+                continue
+                
+            employee_tasks = filtered_df[filtered_df['employee'] == employee]
+            completed = len(employee_tasks[employee_tasks['status'] == 'Completed'])
+            total = len(employee_tasks)
+            
+            employee_stats[employee] = {
+                "total_tasks": total,
+                "completed_tasks": completed,
+                "completion_rate": round((completed / total * 100), 1) if total > 0 else 0
+            }
+        
+        # Get all categories for the dropdown
+        all_categories = df['category'].unique().tolist()
+        all_categories = [c for c in all_categories if c and c.strip()]
+        
+        return jsonify({
+            'success': True,
+            'metrics': {
+                'total_tasks': total_tasks,
+                'completed_tasks': completed_tasks,
+                'in_progress_tasks': in_progress_tasks,
+                'pending_tasks': pending_tasks,
+                'blocked_tasks': blocked_tasks,
+                'completion_rate': completion_rate
+            },
+            'trend_data': trend_data,
+            'category_data': category_counts,
+            'project_health': project_health,
+            'employee_stats': employee_stats,
+            'all_employees': all_employees,
+            'all_categories': all_categories,
+            'filters': {
+                'employee': employee_filter,
+                'project': project_filter
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error in dashboard_data: {traceback.format_exc()}")
+        return jsonify({
+            'success': False,
+            'message': f"Error generating dashboard data: {e}"
+        })
 
 @app.route('/api/process_update', methods=['POST'])
 def process_update():
